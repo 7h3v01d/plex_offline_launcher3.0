@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}{{ server_title or 'Plex Launcher' }}{% endblock %}</title>
+    {#
+        No CDN dependencies — this page works fully offline.
+        Google Fonts is intentionally omitted; system font stack is used instead.
+        Fonts can optionally be self-hosted in static/fonts/ for a custom look.
+    #}
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        :root {
+            --gold: #e5a00d;
+            --gold-dim: #a37008;
+            --bg: #0e0f11;
+            --surface: #161819;
+            --surface2: #1e2022;
+            --border: #2a2d30;
+            --text: #e8e8e8;
+            --text-muted: #7a7e84;
+            --green: #22c55e;
+            --red: #ef4444;
+            --radius: 10px;
+            --header-h: 64px;
+            /* Heading font: Bebas Neue if self-hosted in static/fonts/, else fallback */
+            --font-heading: 'Bebas Neue', 'Impact', 'Arial Narrow', sans-serif;
+            --font-body: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+        }
+
+        html { scroll-behavior: smooth; }
+
+        body {
+            font-family: var(--font-body);
+            background-color: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+        }
+
+        /* ── Header ── */
+        .header {
+            position: sticky; top: 0; z-index: 100;
+            height: var(--header-h);
+            background: rgba(14,15,17,0.85);
+            backdrop-filter: blur(18px);
+            -webkit-backdrop-filter: blur(18px);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            padding: 0 2rem;
+            gap: 1.5rem;
+        }
+
+        .header-logo {
+            font-family: var(--font-heading);
+            font-size: 1.6rem;
+            letter-spacing: 0.05em;
+            color: var(--gold);
+            text-decoration: none;
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+
+        .header-nav {
+            display: flex;
+            align-items: center;
+            gap: 0.25rem;
+            flex-shrink: 0;
+            overflow-x: auto;
+        }
+
+        .header-nav a {
+            color: var(--text-muted);
+            text-decoration: none;
+            font-size: 0.9rem;
+            font-weight: 500;
+            padding: 0.4rem 0.8rem;
+            border-radius: 6px;
+            white-space: nowrap;
+            transition: color 0.15s, background 0.15s;
+        }
+        .header-nav a:hover { color: var(--text); background: var(--surface2); }
+
+        /* Search */
+        .search-form {
+            flex: 1;
+            max-width: 380px;
+            position: relative;
+        }
+        .search-form svg {
+            position: absolute; left: 12px; top: 50%;
+            transform: translateY(-50%);
+            width: 16px; height: 16px;
+            stroke: var(--text-muted); fill: none;
+            pointer-events: none;
+        }
+        .search-form input {
+            width: 100%;
+            background: var(--surface2);
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 0.5rem 1rem 0.5rem 2.4rem;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            font-family: inherit;
+            transition: border-color 0.2s, background 0.2s;
+            outline: none;
+        }
+        .search-form input:focus { border-color: var(--gold); background: var(--surface); }
+        .search-form input::placeholder { color: var(--text-muted); }
+
+        .header-right {
+            margin-left: auto;
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            flex-shrink: 0;
+        }
+
+        /* Status pill */
+        .status-pill {
+            display: flex; align-items: center; gap: 0.45rem;
+            font-size: 0.78rem;
+            font-weight: 500;
+            padding: 0.3rem 0.75rem;
+            border-radius: 999px;
+            border: 1px solid var(--border);
+            background: var(--surface);
+        }
+        .status-dot {
+            width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+        }
+        .status-dot.online  { background: var(--green); box-shadow: 0 0 6px var(--green); }
+        .status-dot.offline { background: var(--red);   box-shadow: 0 0 6px var(--red); }
+
+        /* Switch user link */
+        .switch-user {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            text-decoration: none;
+            padding: 0.35rem 0.7rem;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            transition: color 0.15s, border-color 0.15s;
+        }
+        .switch-user:hover { color: var(--text); border-color: var(--text-muted); }
+
+        /* ── Page container ── */
+        .container {
+            max-width: 1440px;
+            margin: 0 auto;
+            padding: 2rem 2rem 4rem;
+        }
+
+        /* ── Section headings ── */
+        .section-header {
+            display: flex; align-items: baseline; gap: 0.75rem;
+            margin-bottom: 1.25rem;
+        }
+        .section-title {
+            font-family: var(--font-heading);
+            font-size: 1.4rem;
+            letter-spacing: 0.04em;
+            color: var(--text);
+        }
+        .section-link {
+            font-size: 0.8rem;
+            color: var(--gold);
+            text-decoration: none;
+            opacity: 0.8;
+        }
+        .section-link:hover { opacity: 1; text-decoration: underline; }
+
+        /* ── Carousel / row ── */
+        .shelf { margin-bottom: 3rem; }
+
+        .shelf-row {
+            display: flex;
+            overflow-x: auto;
+            gap: 1rem;
+            padding-bottom: 0.75rem;
+            scroll-snap-type: x mandatory;
+            -webkit-overflow-scrolling: touch;
+        }
+        .shelf-row::-webkit-scrollbar { height: 4px; }
+        .shelf-row::-webkit-scrollbar-track { background: transparent; }
+        .shelf-row::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+        /* ── Media card ── */
+        .card {
+            flex-shrink: 0;
+            width: 160px;
+            border-radius: var(--radius);
+            overflow: hidden;
+            text-decoration: none;
+            color: var(--text);
+            background: var(--surface);
+            border: 1px solid var(--border);
+            scroll-snap-align: start;
+            transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s;
+            position: relative;
+        }
+        .card:hover {
+            transform: translateY(-4px) scale(1.02);
+            box-shadow: 0 16px 32px rgba(0,0,0,0.5);
+            border-color: var(--gold-dim);
+        }
+        .card-thumb {
+            width: 100%;
+            aspect-ratio: 2/3;
+            object-fit: cover;
+            display: block;
+            background: var(--surface2);
+        }
+        .card-body { padding: 0.6rem 0.65rem 0.7rem; }
+        .card-title {
+            font-size: 0.82rem;
+            font-weight: 600;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .card-meta {
+            font-size: 0.72rem;
+            color: var(--text-muted);
+            margin-top: 0.2rem;
+        }
+
+        /* watched badge */
+        .watched-badge {
+            position: absolute; top: 6px; right: 6px;
+            background: rgba(0,0,0,0.7);
+            border-radius: 4px;
+            padding: 2px 5px;
+            font-size: 0.65rem;
+            color: var(--green);
+            font-weight: 600;
+            letter-spacing: 0.04em;
+        }
+
+        /* Progress bar on card (for in-progress items) */
+        .card-progress {
+            position: absolute; bottom: 0; left: 0; right: 0;
+            height: 3px;
+            background: rgba(255,255,255,0.15);
+        }
+        .card-progress-fill {
+            height: 100%;
+            background: var(--gold);
+        }
+
+        /* ── Library grid ── */
+        .media-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+            gap: 1.25rem;
+        }
+        .media-grid .card { width: 100%; }
+
+        /* ── Buttons ── */
+        .btn {
+            display: inline-flex; align-items: center; gap: 0.4rem;
+            padding: 0.6rem 1.25rem;
+            border-radius: 7px;
+            font-family: inherit;
+            font-size: 0.9rem;
+            font-weight: 600;
+            text-decoration: none;
+            cursor: pointer;
+            border: none;
+            transition: opacity 0.15s, transform 0.1s;
+        }
+        .btn:active { transform: scale(0.97); }
+        .btn-primary   { background: var(--gold); color: #0e0f11; }
+        .btn-secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+        .btn-success   { background: #16a34a; color: #fff; }
+        .btn-ghost     { background: transparent; color: var(--text-muted); border: 1px solid var(--border); }
+        .btn:hover     { opacity: 0.85; }
+
+        /* ── Empty state ── */
+        .empty-state {
+            text-align: center;
+            padding: 4rem 2rem;
+            color: var(--text-muted);
+        }
+        .empty-state p { margin-top: 0.5rem; font-size: 0.95rem; }
+
+        /* ── Utility ── */
+        .sr-only { position: absolute; width:1px; height:1px; overflow:hidden; clip:rect(0,0,0,0); }
+    </style>
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <header class="header">
+        <a href="/home" class="header-logo">{{ server_title or 'Plex' }}</a>
+
+        {% if session.username %}
+        <nav class="header-nav">
+            {% if libraries is defined %}
+            {% for lib in libraries %}
+            <a href="/library/{{ lib.key }}">{{ lib.title }}</a>
+            {% endfor %}
+            {% endif %}
+        </nav>
+        {% endif %}
+
+        <form class="search-form" action="/search" method="get">
+            <svg viewBox="0 0 24 24" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+            <input type="search" name="query" placeholder="Search your library…" autocomplete="off">
+        </form>
+
+        <div class="header-right">
+            {% if session.username %}
+            <a href="/logout" class="switch-user">Switch User</a>
+            {% endif %}
+            <div class="status-pill">
+                <span class="status-dot {% if is_online %}online{% else %}offline{% endif %}"></span>
+                <span>{% if is_online %}Online{% else %}Offline{% endif %}</span>
+            </div>
+        </div>
+    </header>
+
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+</body>
+</html>

@@ -1,0 +1,242 @@
+{% extends "base.html" %}
+{% block title %}{{ item.title }} — {{ server_title }}{% endblock %}
+{% block head %}
+<style>
+    .backdrop-wrap {
+        position: relative;
+        border-radius: var(--radius);
+        overflow: hidden;
+        margin-bottom: 2.5rem;
+    }
+    .backdrop-img {
+        position: absolute; inset: 0;
+        background-image: url('{{ item.artUrl }}');
+        background-size: cover;
+        background-position: center top;
+        filter: blur(2px) brightness(0.35);
+        transform: scale(1.05);
+    }
+    .backdrop-content {
+        position: relative;
+        display: flex;
+        gap: 2.5rem;
+        padding: 2.5rem;
+        align-items: flex-start;
+    }
+    .poster {
+        width: 200px;
+        flex-shrink: 0;
+        border-radius: 8px;
+        overflow: hidden;
+        box-shadow: 0 20px 40px rgba(0,0,0,0.7);
+        position: relative;
+    }
+    .poster img { width: 100%; display: block; aspect-ratio: 2/3; object-fit: cover; }
+
+    .poster-progress {
+        position: absolute; bottom: 0; left: 0; right: 0;
+        height: 4px;
+        background: rgba(255,255,255,0.15);
+    }
+    .poster-progress-fill { height: 100%; background: var(--gold); }
+
+    .details-body { flex: 1; min-width: 0; }
+    .item-title {
+        font-family: var(--font-heading);
+        font-size: clamp(1.8rem, 4vw, 3rem);
+        letter-spacing: 0.03em;
+        line-height: 1.1;
+        margin-bottom: 0.6rem;
+    }
+    .meta-row {
+        display: flex; flex-wrap: wrap; gap: 0.5rem 1.2rem;
+        align-items: center;
+        margin-bottom: 1.25rem;
+        color: var(--text-muted);
+        font-size: 0.9rem;
+    }
+    .meta-tag {
+        background: var(--surface2);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 0.15rem 0.5rem;
+        font-size: 0.8rem;
+    }
+    .rating-badge { color: var(--gold); font-weight: 700; }
+    .summary {
+        font-size: 0.95rem;
+        line-height: 1.7;
+        color: #c8c8c8;
+        max-width: 700px;
+        margin-bottom: 1.5rem;
+    }
+    .action-row { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; }
+    .resume-hint { font-size: 0.78rem; color: var(--text-muted); align-self: center; }
+
+    .seasons-section { margin-top: 0.5rem; }
+    .season-block { margin-bottom: 2.5rem; }
+    .season-heading {
+        font-family: var(--font-heading);
+        font-size: 1.2rem;
+        letter-spacing: 0.04em;
+        margin-bottom: 0.75rem;
+        color: var(--text-muted);
+    }
+    .episode-list { list-style: none; display: flex; flex-direction: column; gap: 0.5rem; }
+    .episode-row {
+        display: flex; align-items: center; gap: 1rem;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        overflow: hidden;
+        transition: border-color 0.2s;
+        position: relative;
+    }
+    .episode-row:hover { border-color: var(--gold-dim); }
+    .ep-progress {
+        position: absolute; bottom: 0; left: 0; right: 0;
+        height: 3px;
+        background: rgba(255,255,255,0.1);
+        pointer-events: none;
+    }
+    .ep-progress-fill { height: 100%; background: var(--gold); }
+    .ep-thumb {
+        width: 160px; flex-shrink: 0; aspect-ratio: 16/9;
+        object-fit: cover; background: var(--surface2); display: block;
+    }
+    .ep-info { flex: 1; min-width: 0; padding: 0.75rem 0; }
+    .ep-title { font-weight: 600; font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .ep-meta { font-size: 0.75rem; color: var(--text-muted); margin-top: 0.2rem; }
+    .ep-summary {
+        font-size: 0.8rem; color: var(--text-muted); margin-top: 0.3rem; line-height: 1.5;
+        display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+    }
+    .ep-actions { padding: 0.75rem; display: flex; gap: 0.5rem; flex-shrink: 0; }
+
+    @media (max-width: 640px) {
+        .backdrop-content { flex-direction: column; padding: 1.5rem; }
+        .poster { width: 140px; }
+        .ep-thumb { width: 100px; }
+    }
+</style>
+{% endblock %}
+{% block content %}
+
+<div class="backdrop-wrap">
+    <div class="backdrop-img"></div>
+    <div class="backdrop-content">
+        <div class="poster">
+            <img src="{{ item.thumbUrl }}" alt="{{ item.title }}">
+            {% if item.viewOffset and item.duration and not item.isWatched and item.type == 'movie' %}
+            <div class="poster-progress">
+                <div class="poster-progress-fill" style="width: {{ ((item.viewOffset / item.duration) * 100) | int }}%"></div>
+            </div>
+            {% endif %}
+        </div>
+        <div class="details-body">
+            <h1 class="item-title">{{ item.title }}</h1>
+            <div class="meta-row">
+                {% if item.year %}<span>{{ item.year }}</span>{% endif %}
+                {% if item.contentRating %}<span class="meta-tag">{{ item.contentRating }}</span>{% endif %}
+                {% if item.duration and item.type == 'movie' %}
+                    <span>{{ (item.duration // 60000) }} min</span>
+                {% endif %}
+                {% if item.audienceRating %}
+                    <span class="rating-badge">★ {{ "%.1f"|format(item.audienceRating) }}</span>
+                {% endif %}
+                {% if item.type == 'show' %}<span>TV Series</span>{% endif %}
+            </div>
+
+            {% if item.genres %}
+            <div style="display:flex;flex-wrap:wrap;gap:0.4rem;margin-bottom:1rem;">
+                {% for genre in item.genres[:5] %}
+                <span class="meta-tag">{{ genre.tag }}</span>
+                {% endfor %}
+            </div>
+            {% endif %}
+
+            <p class="summary">{{ item.summary }}</p>
+
+            <div class="action-row">
+                {% if item.type == 'movie' %}
+                    {% set vo = item.viewOffset or 0 %}
+                    {% set dur = item.duration or 0 %}
+                    {% if vo > 30000 and dur > 0 and vo < dur - 60000 and not item.isWatched %}
+                        <a href="/player/{{ item.ratingKey }}" class="btn btn-primary">▶ Resume</a>
+                        <span class="resume-hint">
+                            {{ (vo // 60000) }}:{{ "%02d"|format((vo % 60000) // 1000) }} / {{ (dur // 60000) }} min
+                        </span>
+                        <a href="/player/{{ item.ratingKey }}/fresh" class="btn btn-ghost">↩ Play from Beginning</a>
+                    {% else %}
+                        <a href="/player/{{ item.ratingKey }}" class="btn btn-primary">▶ Play Movie</a>
+                    {% endif %}
+                {% endif %}
+
+                {% if item.isWatched %}
+                <a href="/item/{{ item.ratingKey }}/mark_unwatched" class="btn btn-secondary">✓ Mark Unwatched</a>
+                {% else %}
+                <a href="/item/{{ item.ratingKey }}/mark_watched" class="btn btn-success">Mark as Watched</a>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+{% if item.type == 'show' %}
+<section class="seasons-section">
+    <div class="section-header">
+        <h2 class="section-title">Episodes</h2>
+    </div>
+
+    {% for season in item.seasons() %}
+    <div class="season-block">
+        <h3 class="season-heading">{{ season.title }}</h3>
+        <ul class="episode-list">
+            {% for episode in season.episodes() %}
+            {% set vo = episode.viewOffset or 0 %}
+            {% set dur = episode.duration or 0 %}
+            {% set pct = ((vo / dur * 100) | int) if dur > 0 else 0 %}
+            {% set resumable = vo > 30000 and dur > 0 and vo < dur - 60000 and not episode.isWatched %}
+            <li class="episode-row">
+                <img src="{{ episode.thumbUrl }}" alt="{{ episode.title }}" class="ep-thumb" loading="lazy">
+                <div class="ep-info">
+                    <div class="ep-title">
+                        {{ episode.index }}. {{ episode.title }}
+                        {% if episode.isWatched %}<span style="color:var(--green);font-size:0.75rem;"> ✓</span>{% endif %}
+                        {% if resumable %}<span style="color:var(--gold);font-size:0.7rem;"> ● In Progress</span>{% endif %}
+                    </div>
+                    <div class="ep-meta">
+                        {% if dur %}{{ (dur // 60000) }} min{% endif %}
+                        {% if resumable %} · {{ (vo // 60000) }}:{{ "%02d"|format((vo % 60000) // 1000) }} watched{% endif %}
+                    </div>
+                    {% if episode.summary %}
+                    <div class="ep-summary">{{ episode.summary }}</div>
+                    {% endif %}
+                </div>
+                <div class="ep-actions">
+                    {% if resumable %}
+                    <a href="/player/{{ episode.ratingKey }}" class="btn btn-primary" style="padding:0.4rem 0.8rem;font-size:0.8rem;" title="Resume">▶</a>
+                    <a href="/player/{{ episode.ratingKey }}/fresh" class="btn btn-ghost" style="padding:0.4rem 0.8rem;font-size:0.75rem;" title="Play from beginning">↩</a>
+                    {% else %}
+                    <a href="/player/{{ episode.ratingKey }}" class="btn btn-primary" style="padding:0.4rem 0.8rem;font-size:0.8rem;">▶</a>
+                    {% endif %}
+                    {% if episode.isWatched %}
+                    <a href="/item/{{ episode.ratingKey }}/mark_unwatched" class="btn btn-secondary" style="padding:0.4rem 0.8rem;font-size:0.75rem;">Unwatch</a>
+                    {% else %}
+                    <a href="/item/{{ episode.ratingKey }}/mark_watched" class="btn btn-ghost" style="padding:0.4rem 0.8rem;font-size:0.75rem;">Watched</a>
+                    {% endif %}
+                </div>
+                {% if pct > 0 and not episode.isWatched %}
+                <div class="ep-progress">
+                    <div class="ep-progress-fill" style="width: {{ pct }}%"></div>
+                </div>
+                {% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endfor %}
+</section>
+{% endif %}
+
+{% endblock %}

@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Who's Watching? — {{ server_title }}</title>
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        :root {
+            --gold: #e5a00d;
+            --bg: #0e0f11;
+            --surface: #161819;
+            --surface2: #1e2022;
+            --border: #2a2d30;
+            --text: #e8e8e8;
+            --text-muted: #7a7e84;
+            --green: #22c55e;
+            --red: #ef4444;
+            --font-heading: 'Bebas Neue', 'Impact', 'Arial Narrow', sans-serif;
+            --font-body: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+        }
+
+        body {
+            font-family: var(--font-body);
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 3rem;
+            padding: 2rem;
+        }
+
+        .logo {
+            font-family: var(--font-heading);
+            font-size: 2.4rem;
+            letter-spacing: 0.06em;
+            color: var(--gold);
+        }
+
+        h1 {
+            font-family: var(--font-heading);
+            font-size: 2.2rem;
+            letter-spacing: 0.04em;
+            color: var(--text);
+        }
+
+        .users-grid {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 2rem;
+        }
+
+        .user-btn {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0.75rem;
+            cursor: pointer;
+            text-decoration: none;
+            color: var(--text);
+            background: none;
+            border: none;
+            padding: 1rem;
+            border-radius: 12px;
+            transition: background 0.2s, transform 0.15s;
+        }
+        .user-btn:hover {
+            background: var(--surface2);
+            transform: translateY(-4px);
+        }
+
+        .avatar-wrap {
+            width: 96px;
+            height: 96px;
+            border-radius: 50%;
+            overflow: hidden;
+            background: var(--surface2);
+            border: 3px solid var(--border);
+            transition: border-color 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 2.2rem;
+            font-weight: 700;
+            color: var(--gold);
+        }
+        .user-btn:hover .avatar-wrap {
+            border-color: var(--gold);
+        }
+        .avatar-wrap img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .user-name {
+            font-size: 1rem;
+            font-weight: 600;
+        }
+
+        .status-bar {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+        .status-dot {
+            width: 7px; height: 7px;
+            border-radius: 50%;
+        }
+        .online  { background: var(--green); }
+        .offline { background: var(--red); }
+
+        .no-users {
+            color: var(--text-muted);
+            font-size: 0.95rem;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <div class="logo">{{ server_title }}</div>
+
+    <h1>Who's Watching?</h1>
+
+    {% if users %}
+    <div class="users-grid">
+        {% for user in users %}
+        <a href="/login/{{ user.username if user.username else user.title }}" class="user-btn">
+            <div class="avatar-wrap">
+                {% if user._thumbUrl %}
+                {# Proxy the avatar through our local server so it works offline #}
+                <img src="/proxy/avatar?url={{ user._thumbUrl | urlencode }}"
+                     alt="{{ user.title }}"
+                     onerror="this.style.display='none';this.parentElement.textContent='{{ user.title[0] | upper }}'">
+                {% else %}
+                {{ user.title[0] | upper }}
+                {% endif %}
+            </div>
+            <span class="user-name">{{ user.title }}</span>
+        </a>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="no-users">
+        <p>No user profiles found. Check your Plex token in config.py.</p>
+    </div>
+    {% endif %}
+
+    <div class="status-bar">
+        <span class="status-dot {% if is_online %}online{% else %}offline{% endif %}"></span>
+        <span>{% if is_online %}Online{% else %}Offline — local server only{% endif %}</span>
+    </div>
+</body>
+</html>

@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}{{ section.title }} — {{ server_title }}{% endblock %}
+{% block content %}
+<div class="section-header" style="margin-bottom:2rem;">
+    <h1 class="section-title" style="font-size:2rem;">{{ section.title }}</h1>
+    <span style="color:var(--text-muted);font-size:0.9rem;">{{ items|length }} items</span>
+</div>
+
+{% if items %}
+<div class="media-grid">
+    {% for item in items %}
+    {% set vo = item.viewOffset or 0 %}
+    {% set dur = item.duration or 0 %}
+    {% set pct = ((vo / dur * 100) | int) if dur > 0 else 0 %}
+    <a href="/item/{{ item.ratingKey }}" class="card">
+        {% if item.isWatched %}<span class="watched-badge">✓</span>{% endif %}
+        <img src="{{ item.thumbUrl }}" alt="{{ item.title }}" class="card-thumb" loading="lazy">
+        {% if pct > 0 and not item.isWatched %}
+        <div class="card-progress">
+            <div class="card-progress-fill" style="width: {{ pct }}%"></div>
+        </div>
+        {% endif %}
+        <div class="card-body">
+            <div class="card-title">{{ item.title }}</div>
+            <div class="card-meta">{% if item.year %}{{ item.year }}{% endif %}</div>
+        </div>
+    </a>
+    {% endfor %}
+</div>
+{% else %}
+<div class="empty-state">
+    <p>This library appears to be empty.</p>
+</div>
+{% endif %}
+{% endblock %}

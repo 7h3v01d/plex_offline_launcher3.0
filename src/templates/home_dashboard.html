@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Home — {{ server_title }}{% endblock %}
+{% block content %}
+
+{% if on_deck %}
+<section class="shelf">
+    <div class="section-header">
+        <h2 class="section-title">Continue Watching</h2>
+    </div>
+    <div class="shelf-row">
+        {% for item in on_deck %}
+        <a href="/item/{{ item.ratingKey }}" class="card">
+            {% if item.isWatched %}<span class="watched-badge">✓ Watched</span>{% endif %}
+            <img src="{{ item.thumbUrl }}" alt="{{ item.title }}" class="card-thumb" loading="lazy">
+            {% if item.viewOffset and item.duration and not item.isWatched %}
+            <div class="card-progress">
+                <div class="card-progress-fill" style="width: {{ ((item.viewOffset / item.duration) * 100) | int }}%"></div>
+            </div>
+            {% endif %}
+            <div class="card-body">
+                <div class="card-title">
+                    {% if item.type == 'episode' %}
+                        S{{ "%02d"|format(item.parentIndex) }}E{{ "%02d"|format(item.index) }} · {{ item.title }}
+                    {% else %}
+                        {{ item.title }}
+                    {% endif %}
+                </div>
+                <div class="card-meta">
+                    {% if item.type == 'episode' %}{{ item.grandparentTitle }}
+                    {% else %}{{ item.type | capitalize }}{% if item.year %} · {{ item.year }}{% endif %}{% endif %}
+                </div>
+            </div>
+        </a>
+        {% endfor %}
+    </div>
+</section>
+{% endif %}
+
+{% if recently_added %}
+<section class="shelf">
+    <div class="section-header">
+        <h2 class="section-title">Recently Added</h2>
+    </div>
+    <div class="shelf-row">
+        {% for item in recently_added %}
+        <a href="/item/{{ item.ratingKey }}" class="card">
+            <img src="{{ item.thumbUrl }}" alt="{{ item.title }}" class="card-thumb" loading="lazy">
+            <div class="card-body">
+                <div class="card-title">{{ item.title }}</div>
+                <div class="card-meta">{{ item.type | capitalize }}{% if item.year %} · {{ item.year }}{% endif %}</div>
+            </div>
+        </a>
+        {% endfor %}
+    </div>
+</section>
+{% endif %}
+
+{% if not on_deck and not recently_added %}
+<div class="empty-state">
+    <h2 style="font-family:var(--font-heading);font-size:2rem;letter-spacing:0.05em;">Nothing here yet</h2>
+    <p>Start playing something on Plex to see your queue here.</p>
+</div>
+{% endif %}
+
+{% endblock %}
