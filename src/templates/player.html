@@ -162,6 +162,38 @@
         }
         @keyframes spin { to { transform: rotate(360deg); } }
 
+        /* ── Network / offline error overlay ── */
+        #network-overlay {
+            position: absolute; inset: 0; z-index: 15;
+            display: none; flex-direction: column;
+            align-items: center; justify-content: center;
+            gap: 1.25rem; background: rgba(0,0,0,0.88);
+            text-align: center; padding: 2rem;
+        }
+        #network-overlay.visible { display: flex; }
+        .network-icon {
+            width: 56px; height: 56px; border-radius: 50%;
+            background: rgba(239,68,68,0.15);
+            display: flex; align-items: center; justify-content: center;
+        }
+        .network-icon svg { width: 28px; height: 28px; fill: var(--red); }
+        .network-title { font-weight: 700; font-size: 1.1rem; }
+        .network-body  { font-size: 0.88rem; color: var(--text-muted); max-width: 340px; line-height: 1.6; }
+        .network-hint  {
+            font-size: 0.78rem; color: var(--text-muted);
+            background: var(--surface); border: 1px solid var(--border);
+            border-radius: 7px; padding: 0.5rem 1rem;
+            font-family: monospace; letter-spacing: 0.02em;
+        }
+        .network-retry {
+            background: var(--gold); color: #0e0f11;
+            border: none; border-radius: 7px;
+            padding: 0.6rem 1.4rem; font-family: inherit;
+            font-size: 0.9rem; font-weight: 600; cursor: pointer;
+            transition: opacity 0.15s;
+        }
+        .network-retry:hover { opacity: 0.85; }
+
         /* ── Auto-play next episode countdown ── */
         #autoplay-overlay {
             position: absolute; bottom: 120px; right: 2rem; z-index: 20;
@@ -219,6 +251,19 @@
     <div class="overlay" id="loading-overlay">
         <div class="spinner"></div>
         <span>Loading stream…</span>
+    </div>
+
+    <!-- Network / offline overlay — shown when the stream can't connect to Plex -->
+    <div id="network-overlay">
+        <div class="network-icon">
+            <svg viewBox="0 0 24 24"><path d="M1 1l22 22M16.72 11.06A10.94 10.94 0 0 1 19 12.55M5 12.55a10.94 10.94 0 0 1 5.17-2.39M10.71 5.05A16 16 0 0 1 22.56 9M1.42 9a15.91 15.91 0 0 1 4.7-2.88M8.53 16.11a6 6 0 0 1 6.95 0M12 20h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/></svg>
+        </div>
+        <div class="network-title">Can't reach Plex</div>
+        <div class="network-body">
+            The stream couldn't connect. Make sure you're on the same local network as your Plex server.
+        </div>
+        <div class="network-hint">{{ config_url }}</div>
+        <button class="network-retry" id="network-retry">Try Again</button>
     </div>
 
     <video id="video" preload="auto"></video>
@@ -385,9 +430,17 @@
             });
             hls.on(Hls.Events.ERROR, function (e, data) {
                 if (data.fatal) {
-                    loadingOverlay.querySelector('span').textContent =
-                        'Stream error: ' + (data.details || 'unknown');
-                    loadingOverlay.classList.remove('hidden');
+                    // Distinguish network errors (can't reach Plex) from
+                    // other fatal errors (unsupported codec, bad manifest, etc.)
+                    var isNetworkError = data.type === Hls.ErrorTypes.NETWORK_ERROR;
+                    if (isNetworkError) {
+                        loadingOverlay.classList.add('hidden');
+                        showNetworkOverlay();
+                    } else {
+                        loadingOverlay.querySelector('span').textContent =
+                            'Stream error: ' + (data.details || 'unknown');
+                        loadingOverlay.classList.remove('hidden');
+                    }
                 }
             });
         } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
@@ -488,6 +541,25 @@
     btnRewind.addEventListener('click',  function () { video.currentTime = Math.max(0, video.currentTime - 10); });
     btnForward.addEventListener('click', function () { video.currentTime = Math.min(video.duration || Infinity, video.currentTime + 10); });
 
+    // ── Network overlay ──────────────────────────────────────────────────────
+    var networkOverlay = document.getElementById('network-overlay');
+    var networkRetry   = document.getElementById('network-retry');
+
+    function showNetworkOverlay() {
+        if (networkOverlay) networkOverlay.classList.add('visible');
+        wrap.classList.add('show-ui');   // keep controls visible
+    }
+    function hideNetworkOverlay() {
+        if (networkOverlay) networkOverlay.classList.remove('visible');
+    }
+
+    if (networkRetry) {
+        networkRetry.addEventListener('click', function () {
+            hideNetworkOverlay();
+            initPlayer(streamUrl, video.currentTime);
+        });
+    }
+
     // ── Volume ────────────────────────────────────────────────────────────────
     function syncVolumeIcon() {
         iconVol.style.display  = video.muted ? 'none' : '';
@@ -571,6 +643,12 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ offset_ms: currentMs, duration_ms: durMs, state: state }),
             keepalive: true
+        }).then(function (r) {
+            // 401 means session expired — the player JS can keep running but
+            // progress won't be saved. Surface a brief console warning only.
+            if (r.status === 401) {
+                console.warn('Plex session expired — scrobble paused. Reload to re-authenticate.');
+            }
         }).catch(function () {});
     }
     video.addEventListener('pause', function () { reportProgress('paused'); });

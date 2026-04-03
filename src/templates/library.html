@@ -22,7 +22,6 @@
     }
     .toolbar-spacer { flex: 1; }
 
-    /* Sort / filter controls */
     .toolbar-select {
         background: var(--surface2);
         border: 1px solid var(--border);
@@ -57,28 +56,26 @@
     }
     .toolbar-toggle:hover { color: var(--text); border-color: var(--text-muted); }
 
-    /* Scroll sentinel */
-    #scroll-sentinel {
-        height: 1px;
-        margin-top: 2rem;
+    /* Music / photo cards use square thumbs instead of 2:3 poster ratio */
+    .card-thumb-square {
+        width: 100%;
+        aspect-ratio: 1/1;
+        object-fit: cover;
+        display: block;
+        background: var(--surface2);
     }
+
+    #scroll-sentinel { height: 1px; margin-top: 2rem; }
     .load-indicator {
-        text-align: center;
-        padding: 2rem;
-        color: var(--text-muted);
-        font-size: 0.9rem;
-        display: none;
+        text-align: center; padding: 2rem;
+        color: var(--text-muted); font-size: 0.9rem; display: none;
     }
     .load-indicator.visible { display: block; }
     .load-spinner {
-        display: inline-block;
-        width: 24px; height: 24px;
-        border: 2px solid var(--border);
-        border-top-color: var(--gold);
-        border-radius: 50%;
-        animation: spin 0.7s linear infinite;
-        vertical-align: middle;
-        margin-right: 0.5rem;
+        display: inline-block; width: 24px; height: 24px;
+        border: 2px solid var(--border); border-top-color: var(--gold);
+        border-radius: 50%; animation: spin 0.7s linear infinite;
+        vertical-align: middle; margin-right: 0.5rem;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
 </style>
@@ -92,17 +89,15 @@
     </span>
     <div class="toolbar-spacer"></div>
 
-    <!-- Sort -->
+    <!-- Sort — options are type-aware from the route -->
     <select class="toolbar-select" id="sort-select">
-        <option value="titleSort:asc"   {% if sort == 'titleSort:asc'   %}selected{% endif %}>A – Z</option>
-        <option value="titleSort:desc"  {% if sort == 'titleSort:desc'  %}selected{% endif %}>Z – A</option>
-        <option value="addedAt:desc"    {% if sort == 'addedAt:desc'    %}selected{% endif %}>Recently Added</option>
-        <option value="addedAt:asc"     {% if sort == 'addedAt:asc'     %}selected{% endif %}>Oldest Added</option>
-        <option value="originallyAvailableAt:desc" {% if sort == 'originallyAvailableAt:desc' %}selected{% endif %}>Newest Release</option>
-        <option value="rating:desc"     {% if sort == 'rating:desc'     %}selected{% endif %}>Top Rated</option>
+        {% for value, label in sort_options %}
+        <option value="{{ value }}" {% if sort == value %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
     </select>
 
-    <!-- Unwatched only toggle -->
+    <!-- Unwatched toggle — only shown for video libraries -->
+    {% if supports_unwatched %}
     <button class="toolbar-toggle {% if unwatched %}active{% endif %}" id="unwatched-toggle">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
             <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
@@ -110,6 +105,7 @@
         </svg>
         Unwatched only
     </button>
+    {% endif %}
 </div>
 
 {% if items %}
@@ -120,9 +116,13 @@
     {% set pct = ((vo / dur * 100) | int) if dur > 0 else 0 %}
     <a href="/item/{{ item.ratingKey }}" class="card">
         {% if item.isWatched %}<span class="watched-badge">✓</span>{% endif %}
+        {% if section_type in ('artist', 'photo') %}
+        <img src="{{ item.thumbUrl }}" alt="{{ item.title }}" class="card-thumb-square" loading="lazy">
+        {% else %}
         <img src="{{ item.thumbUrl }}" alt="{{ item.title }}" class="card-thumb" loading="lazy">
         {% if pct > 0 and not item.isWatched %}
         <div class="card-progress"><div class="card-progress-fill" style="width:{{ pct }}%"></div></div>
+        {% endif %}
         {% endif %}
         <div class="card-body">
             <div class="card-title">{{ item.title }}</div>
@@ -145,127 +145,109 @@
 
 <script>
 (function () {
-    var LIBRARY_KEY = {{ section.key | tojson }};
-    var PAGE_SIZE   = {{ page_size }};
-    var TOTAL       = {{ total }};
-    var currentSort = {{ sort | tojson }};
-    var unwatched   = {{ 'true' if unwatched else 'false' }};
+    var LIBRARY_KEY  = {{ section.key | tojson }};
+    var SECTION_TYPE = {{ section_type | tojson }};
+    var PAGE_SIZE    = {{ page_size }};
+    var TOTAL        = {{ total }};
+    var currentSort  = {{ sort | tojson }};
+    var unwatched    = {{ 'true' if unwatched else 'false' }};
+    var supportsUW   = {{ 'true' if supports_unwatched else 'false' }};
 
-    var grid        = document.getElementById('media-grid');
-    var indicator   = document.getElementById('load-indicator');
-    var sentinel    = document.getElementById('scroll-sentinel');
-    var countLabel  = document.getElementById('count-label');
-    var emptyState  = document.getElementById('empty-state');
-    var sortSelect  = document.getElementById('sort-select');
-    var uwToggle    = document.getElementById('unwatched-toggle');
+    var grid       = document.getElementById('media-grid');
+    var indicator  = document.getElementById('load-indicator');
+    var sentinel   = document.getElementById('scroll-sentinel');
+    var emptyState = document.getElementById('empty-state');
+    var sortSelect = document.getElementById('sort-select');
+    var uwToggle   = document.getElementById('unwatched-toggle');
 
-    var offset      = {{ items | length }};   // already-rendered count
-    var loading     = false;
-    // When TOTAL is the 999999 sentinel (real count unknown), never pre-exhaust;
-    // rely on receiving fewer than PAGE_SIZE items to stop pagination.
+    var offset     = {{ items | length }};
+    var loading    = false;
     var TOTAL_KNOWN = TOTAL < 999999;
-    var exhausted   = TOTAL_KNOWN && offset >= TOTAL;
+    var exhausted  = TOTAL_KNOWN && offset >= TOTAL;
 
-    // ── Card builder ─────────────────────────────────────────────────────────
     function buildCard(card) {
-        var a   = document.createElement('a');
-        a.href  = '/item/' + card.ratingKey;
+        var a = document.createElement('a');
+        a.href = '/item/' + card.ratingKey;
         a.className = 'card';
 
         if (card.isWatched) {
             var badge = document.createElement('span');
-            badge.className   = 'watched-badge';
+            badge.className = 'watched-badge';
             badge.textContent = '✓';
             a.appendChild(badge);
         }
 
-        var img   = document.createElement('img');
-        img.src   = card.thumbUrl;
-        img.alt   = card.title;
-        img.className = 'card-thumb';
-        img.loading   = 'lazy';
+        var img = document.createElement('img');
+        img.src = card.thumbUrl;
+        img.alt = card.title;
+        img.loading = 'lazy';
+        // Use square thumbs for music/photo, poster ratio for video
+        img.className = (SECTION_TYPE === 'artist' || SECTION_TYPE === 'photo')
+            ? 'card-thumb-square' : 'card-thumb';
         a.appendChild(img);
 
-        if (card.pct > 0 && !card.isWatched) {
-            var prog  = document.createElement('div');
+        if (card.pct > 0 && !card.isWatched && SECTION_TYPE !== 'artist' && SECTION_TYPE !== 'photo') {
+            var prog = document.createElement('div');
             prog.className = 'card-progress';
-            var fill  = document.createElement('div');
+            var fill = document.createElement('div');
             fill.className = 'card-progress-fill';
             fill.style.width = card.pct + '%';
             prog.appendChild(fill);
             a.appendChild(prog);
         }
 
-        var body  = document.createElement('div');
+        var body = document.createElement('div');
         body.className = 'card-body';
         var title = document.createElement('div');
-        title.className   = 'card-title';
+        title.className = 'card-title';
         title.textContent = card.title;
-        var meta  = document.createElement('div');
-        meta.className    = 'card-meta';
-        meta.textContent  = card.year || '';
+        var meta = document.createElement('div');
+        meta.className = 'card-meta';
+        meta.textContent = card.year || '';
         body.appendChild(title);
         body.appendChild(meta);
         a.appendChild(body);
-
         return a;
     }
 
-    // ── Fetch next page ───────────────────────────────────────────────────────
     function loadMore() {
         if (loading || exhausted) return;
         loading = true;
         indicator.classList.add('visible');
 
-        var url = '/api/library/' + LIBRARY_KEY + '/page'
-            + '?offset=' + offset
-            + '&sort='   + encodeURIComponent(currentSort)
-            + '&unwatched=' + (unwatched ? '1' : '0');
-
-        fetch(url)
+        fetch('/api/library/' + LIBRARY_KEY + '/page'
+            + '?offset='    + offset
+            + '&sort='      + encodeURIComponent(currentSort)
+            + '&unwatched=' + (unwatched ? '1' : '0'))
             .then(function (r) { return r.json(); })
             .then(function (data) {
-                if (data.error) { console.error(data.error); return; }
-                data.cards.forEach(function (card) {
-                    grid.appendChild(buildCard(card));
-                });
+                if (data.error) { console.error(data.error); loading = false; indicator.classList.remove('visible'); return; }
+                data.cards.forEach(function (card) { grid.appendChild(buildCard(card)); });
                 offset   += data.count;
                 exhausted = (TOTAL_KNOWN && offset >= TOTAL) || data.count < PAGE_SIZE;
                 loading   = false;
                 indicator.classList.remove('visible');
                 if (emptyState && offset > 0) emptyState.style.display = 'none';
             })
-            .catch(function () {
-                loading = false;
-                indicator.classList.remove('visible');
-            });
+            .catch(function () { loading = false; indicator.classList.remove('visible'); });
     }
 
-    // ── Infinite scroll via IntersectionObserver ──────────────────────────────
     if ('IntersectionObserver' in window) {
-        var obs = new IntersectionObserver(function (entries) {
+        new IntersectionObserver(function (entries) {
             if (entries[0].isIntersecting) loadMore();
-        }, { rootMargin: '200px' });
-        obs.observe(sentinel);
+        }, { rootMargin: '200px' }).observe(sentinel);
     }
 
-    // ── Sort / filter controls ────────────────────────────────────────────────
     function reloadWithParams() {
-        var url = window.location.pathname
+        window.location.href = window.location.pathname
             + '?sort='      + encodeURIComponent(currentSort)
             + '&unwatched=' + (unwatched ? '1' : '0');
-        window.location.href = url;
     }
 
-    sortSelect.addEventListener('change', function () {
-        currentSort = this.value;
-        reloadWithParams();
-    });
-
-    uwToggle.addEventListener('click', function () {
-        unwatched = !unwatched;
-        reloadWithParams();
-    });
+    sortSelect.addEventListener('change', function () { currentSort = this.value; reloadWithParams(); });
+    if (uwToggle) {
+        uwToggle.addEventListener('click', function () { unwatched = !unwatched; reloadWithParams(); });
+    }
 })();
 </script>
 {% endblock %}

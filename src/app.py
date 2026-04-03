@@ -4,7 +4,9 @@ import time
 import threading
 import requests
 import base64
-from flask import Flask, render_template, abort, request, session, redirect, url_for, jsonify, Response, g
+from urllib.parse import urlparse
+from flask import (Flask, render_template, abort, request, session,
+                   redirect, url_for, jsonify, Response, g)
 from plexapi.server import PlexServer
 from plexapi.exceptions import NotFound
 from functools import wraps
@@ -53,16 +55,105 @@ def get_internet_status():
         return _internet_status['online']
 
 # ---------------------------------------------------------------------------
-# Template context — libraries injected into every render automatically
-# so the header nav works on every page without each route passing it manually.
+# Library section cache — per user, TTL 60s
+# Avoids calling switchUser() + library.sections() on every page render.
+# Stored in a module-level dict keyed by username; entries expire after 60s.
+# ---------------------------------------------------------------------------
+
+_section_cache      = {}   # {username: {'sections': [...], 'expires': monotonic}}
+_section_cache_lock = threading.Lock()
+_SECTION_TTL        = 60   # seconds
+
+def get_cached_sections(user_plex, username):
+    """Return library sections for this user, using a 60s in-memory cache."""
+    now = time.monotonic()
+    with _section_cache_lock:
+        entry = _section_cache.get(username)
+        if entry and entry['expires'] > now:
+            return entry['sections']
+    # Cache miss or expired — fetch fresh
+    try:
+        sections = user_plex.library.sections()
+    except Exception:
+        sections = []
+    with _section_cache_lock:
+        _section_cache[username] = {'sections': sections, 'expires': now + _SECTION_TTL}
+    return sections
+
+# ---------------------------------------------------------------------------
+# Avatar proxy domain allowlist
+# Only domains known to serve Plex user avatars are permitted.
+# ---------------------------------------------------------------------------
+
+_AVATAR_ALLOWED_HOSTS = {
+    'plex.tv',
+    'www.plex.tv',
+    'metadata.provider.plex.tv',
+    'users.plex.tv',
+    'provider.plex.tv',
+    'i.imgur.com',       # Plex allows Imgur avatars
+    'gravatar.com',
+    'www.gravatar.com',
+    'secure.gravatar.com',
+}
+
+def is_allowed_avatar_url(url):
+    """Return True if the URL host is on the avatar allowlist."""
+    try:
+        host = urlparse(url).hostname or ''
+        # Allow exact match or any subdomain of an allowed host
+        return any(
+            host == allowed or host.endswith('.' + allowed)
+            for allowed in _AVATAR_ALLOWED_HOSTS
+        )
+    except Exception:
+        return False
+
+# ---------------------------------------------------------------------------
+# Library type helpers
+# ---------------------------------------------------------------------------
+
+# Video library types get full sort options and watched/unwatched filtering.
+# Music and photo sections use simpler options.
+_VIDEO_SECTION_TYPES = {'movie', 'show'}
+_MUSIC_SECTION_TYPES = {'artist'}
+_PHOTO_SECTION_TYPES = {'photo'}
+
+def section_sort_options(section_type):
+    """Return list of (value, label) sort tuples appropriate for this section type."""
+    base = [
+        ('titleSort:asc',  'A – Z'),
+        ('titleSort:desc', 'Z – A'),
+        ('addedAt:desc',   'Recently Added'),
+        ('addedAt:asc',    'Oldest Added'),
+    ]
+    if section_type in _VIDEO_SECTION_TYPES:
+        base += [
+            ('originallyAvailableAt:desc', 'Newest Release'),
+            ('rating:desc',                'Top Rated'),
+        ]
+    if section_type in _MUSIC_SECTION_TYPES:
+        base += [
+            ('year:desc', 'Newest Release'),
+        ]
+    return base
+
+def section_default_sort(section_type):
+    return 'titleSort:asc'
+
+def section_supports_unwatched(section_type):
+    """Only video sections have a meaningful unwatched filter."""
+    return section_type in _VIDEO_SECTION_TYPES
+
+# ---------------------------------------------------------------------------
+# Template context processor
 # ---------------------------------------------------------------------------
 
 @app.context_processor
 def inject_globals():
     """Inject server_title, is_online, and libraries into every template.
-    Library sections are only fetched for page routes — skipped for API/proxy
-    endpoints that never render HTML, so we don't waste a switchUser() call
-    on every /api/status poll or /proxy/avatar request.
+    Skipped for API/proxy/static routes that never render HTML.
+    Library sections are cached per user for 60s to avoid repeated switchUser() calls.
     """
     path = request.path
     is_page_route = not (
@@ -77,7 +168,7 @@ def inject_globals():
         try:
             user_plex = get_plex_instance()
             if user_plex:
-                libs = user_plex.library.sections()
+                libs = get_cached_sections(user_plex, session['username'])
         except Exception:
             pass
 
@@ -103,6 +194,10 @@ def login_required(f):
             abort(500, "Plex server not connected.")
         user_plex = get_plex_instance()
         if not user_plex:
+            # Fix 3: API routes get a JSON 401, not a redirect, so the player
+            # JS can detect session expiry and surface a proper message.
+            if request.path.startswith('/api/'):
+                return jsonify({'error': 'session_expired', 'ok': False}), 401
             return redirect(url_for('user_select'))
         return f(*args, **kwargs, user_plex=user_plex)
     return decorated
@@ -171,9 +266,6 @@ def safe_total_size(section):
         return None
 
 def get_extras(item):
-    """Return list of extra dicts for trailers, behind-the-scenes, etc.
-    Returns [] if the item has none or the call fails.
-    """
     try:
         extras = item.extras()
         result = []
@@ -181,12 +273,13 @@ def get_extras(item):
             result.append({
                 'ratingKey': e.ratingKey,
                 'title':     e.title,
-                'subtype':   (e.subtype or 'extra').replace('behindTheScenes', 'Behind the Scenes')
-                                                    .replace('sceneOrSample', 'Scene')
-                                                    .replace('interview', 'Interview')
-                                                    .replace('trailer', 'Trailer')
-                                                    .replace('featurette', 'Featurette')
-                                                    .replace('short', 'Short'),
+                'subtype':   (e.subtype or 'extra')
+                                .replace('behindTheScenes', 'Behind the Scenes')
+                                .replace('sceneOrSample',   'Scene')
+                                .replace('interview',       'Interview')
+                                .replace('trailer',         'Trailer')
+                                .replace('featurette',      'Featurette')
+                                .replace('short',           'Short'),
                 'duration':  e.duration or 0,
                 'thumbUrl':  add_auth_to_url(e.thumb),
             })
@@ -236,6 +329,9 @@ def proxy_avatar():
     url = request.args.get('url', '')
     if not url:
         abort(400)
+    # Fix 4: domain allowlist — only proxy known Plex avatar hosts
+    if not is_allowed_avatar_url(url):
+        abort(403)
     return proxy_image(url)
 
 @app.route('/api/status')
@@ -245,11 +341,19 @@ def api_status():
 @app.route('/login/<username>')
 def login(username):
     session['username'] = username
+    # Invalidate section cache on login so the new user's libraries load fresh
+    with _section_cache_lock:
+        _section_cache.pop(username, None)
     return redirect(url_for('home'))
 
 @app.route('/logout')
 def logout():
+    username = session.get('username')
     session.clear()
+    # Clear cached sections for this user on logout
+    if username:
+        with _section_cache_lock:
+            _section_cache.pop(username, None)
     return redirect(url_for('user_select'))
 
 @app.route('/home')
@@ -262,7 +366,7 @@ def home(user_plex):
                            recently_added=recently_added)
 
 # ---------------------------------------------------------------------------
-# Library — paginated
+# Library — paginated, type-aware
 # ---------------------------------------------------------------------------
 PAGE_SIZE = 48
 
@@ -270,10 +374,18 @@ PAGE_SIZE = 48
 @login_required
 def library(user_plex, library_key):
     try:
-        section   = user_plex.library.sectionByID(int(library_key))
-        sort      = request.args.get('sort', 'titleSort:asc')
-        unwatched = request.args.get('unwatched', '0') == '1'
-        total     = safe_total_size(section)
+        section      = user_plex.library.sectionByID(int(library_key))
+        section_type = section.type   # 'movie', 'show', 'artist', 'photo'
+        sort         = request.args.get('sort', section_default_sort(section_type))
+        unwatched    = (request.args.get('unwatched', '0') == '1'
+                        and section_supports_unwatched(section_type))
+        total        = safe_total_size(section)
+        sort_options = section_sort_options(section_type)
+
+        # Validate sort value against allowed options to prevent injection
+        allowed_sorts = {v for v, _ in sort_options}
+        if sort not in allowed_sorts:
+            sort = section_default_sort(section_type)
 
         kwargs = dict(sort=sort, container_start=0, container_size=PAGE_SIZE, maxresults=PAGE_SIZE)
         if unwatched:
@@ -283,11 +395,14 @@ def library(user_plex, library_key):
 
         return render_template('library.html',
                                section=section,
+                               section_type=section_type,
                                items=items,
                                total=total if total is not None else 999999,
                                display_total=total if total is not None else '?',
                                page_size=PAGE_SIZE,
                                sort=sort,
+                               sort_options=sort_options,
+                               supports_unwatched=section_supports_unwatched(section_type),
                                unwatched=unwatched)
     except Exception as e:
         abort(404, f"Library not found: {e}")
@@ -296,10 +411,16 @@ def library(user_plex, library_key):
 @login_required
 def library_page(user_plex, library_key):
     try:
-        section   = user_plex.library.sectionByID(int(library_key))
-        offset    = int(request.args.get('offset', 0))
-        sort      = request.args.get('sort', 'titleSort:asc')
-        unwatched = request.args.get('unwatched', '0') == '1'
+        section      = user_plex.library.sectionByID(int(library_key))
+        section_type = section.type
+        offset       = int(request.args.get('offset', 0))
+        sort         = request.args.get('sort', section_default_sort(section_type))
+        unwatched    = (request.args.get('unwatched', '0') == '1'
+                        and section_supports_unwatched(section_type))
+
+        allowed_sorts = {v for v, _ in section_sort_options(section_type)}
+        if sort not in allowed_sorts:
+            sort = section_default_sort(section_type)
 
         kwargs = dict(sort=sort, container_start=offset, container_size=PAGE_SIZE, maxresults=PAGE_SIZE)
         if unwatched:
@@ -311,12 +432,13 @@ def library_page(user_plex, library_key):
             vo  = item.viewOffset or 0
             dur = item.duration   or 0
             cards.append({
-                'ratingKey': item.ratingKey,
-                'title':     item.title,
-                'year':      item.year,
-                'thumbUrl':  item.thumbUrl,
-                'isWatched': item.isWatched,
-                'pct':       int(vo / dur * 100) if dur > 0 else 0,
+                'ratingKey':     item.ratingKey,
+                'title':         item.title,
+                'year':          item.year,
+                'thumbUrl':      item.thumbUrl,
+                'isWatched':     getattr(item, 'isWatched', False),
+                'pct':           int(vo / dur * 100) if dur > 0 else 0,
+                'section_type':  section_type,
             })
         return jsonify({'cards': cards, 'offset': offset, 'count': len(cards)})
     except Exception as e:
@@ -334,15 +456,12 @@ def item_details(user_plex, rating_key):
         extras         = []
 
         if item.type == 'show':
-            # Fetch seasons once, enrich, and store — the template receives
-            # a pre-built list so item.seasons() is never called a second time.
             seasons_data = item.seasons()
             for season in seasons_data:
                 season.thumbUrl = add_auth_to_url(season.thumb)
                 for episode in season.episodes():
                     episode.thumbUrl = add_auth_to_url(episode.thumb)
             item._cached_seasons = seasons_data
-            # onDeck returns the next episode to watch (in-progress or first unwatched)
             try:
                 next_unwatched = item.onDeck()
             except Exception:
@@ -427,7 +546,8 @@ def player(user_plex, rating_key):
                                prev_ep=prev_ep,
                                next_ep=next_ep,
                                streams=streams,
-                               show_rating_key=show_rating_key)
+                               show_rating_key=show_rating_key,
+                               config_url=config.PLEX_URL)
     except NotFound:
         abort(404, "Media not found.")
 
