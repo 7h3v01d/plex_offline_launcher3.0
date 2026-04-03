@@ -1,5 +1,7 @@
 # app.py
 
+import time
+import threading
 import requests
 import base64
 from flask import Flask, render_template, abort, request, session, redirect, url_for, jsonify, Response
@@ -26,15 +28,37 @@ except Exception as e:
     print(f"❌ Could not connect to Plex. Error: {e}")
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Internet status cache
+# Checked once every 15 seconds in a background thread.
+# All page renders read from this cache — zero blocking network I/O per request.
 # ---------------------------------------------------------------------------
 
-def check_internet_connection():
-    try:
-        requests.get("http://detectportal.firefox.com/success.txt", timeout=3)
-        return True
-    except (requests.ConnectionError, requests.Timeout):
-        return False
+_internet_status = {'online': False, 'checked_at': 0}
+_internet_lock   = threading.Lock()
+
+def _refresh_internet_status():
+    """Background thread: polls internet connectivity every 15 seconds."""
+    while True:
+        try:
+            requests.get("http://detectportal.firefox.com/success.txt", timeout=3)
+            online = True
+        except Exception:
+            online = False
+        with _internet_lock:
+            _internet_status['online']     = online
+            _internet_status['checked_at'] = time.monotonic()
+        time.sleep(15)
+
+_status_thread = threading.Thread(target=_refresh_internet_status, daemon=True)
+_status_thread.start()
+
+def get_internet_status():
+    with _internet_lock:
+        return _internet_status['online']
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def add_auth_to_url(url):
     if not url:
@@ -64,7 +88,6 @@ def get_plex_instance():
 def enrich(items):
     for item in items:
         item.thumbUrl = add_auth_to_url(item.thumb)
-        # Ensure these attributes exist for template progress bars
         if not hasattr(item, 'viewOffset') or item.viewOffset is None:
             item.viewOffset = 0
         if not hasattr(item, 'duration') or item.duration is None:
@@ -72,18 +95,51 @@ def enrich(items):
     return items
 
 def proxy_image(url):
-    """Fetch an external image and return it as a proxied response.
-    Used for user avatars which come from plex.tv (unavailable offline).
-    """
+    """Fetch an external image and proxy it locally (for offline avatar access)."""
     try:
         r = requests.get(url, timeout=5)
         return Response(r.content, content_type=r.headers.get('Content-Type', 'image/jpeg'))
     except Exception:
-        # Return a 1x1 transparent PNG as fallback
         transparent_png = base64.b64decode(
             'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
         )
         return Response(transparent_png, content_type='image/png')
+
+def get_streams(item):
+    """Return audio and subtitle streams from the first media part of an item.
+
+    Returns a dict with keys:
+      audio_streams     – list of dicts (id, index, label, selected, channels, codec)
+      subtitle_streams  – list of dicts (id, index, label, selected, forced, codec)
+      part_id           – int, the MediaPart id (needed for Plex stream-select API)
+    """
+    try:
+        part = item.media[0].parts[0]
+        audio = []
+        subs  = []
+        for s in part.streams:
+            label = s.extendedDisplayTitle or s.displayTitle or s.language or s.codec or f"Track {s.index}"
+            if s.streamType == 2:   # audio
+                audio.append({
+                    'id':       s.id,
+                    'index':    s.index,
+                    'label':    label,
+                    'selected': bool(s.selected),
+                    'codec':    s.codec or '',
+                    'channels': getattr(s, 'channels', None),
+                })
+            elif s.streamType == 3:  # subtitle
+                subs.append({
+                    'id':       s.id,
+                    'index':    s.index,
+                    'label':    label,
+                    'selected': bool(s.selected),
+                    'forced':   bool(getattr(s, 'forced', False)),
+                    'codec':    s.codec or '',
+                })
+        return {'audio_streams': audio, 'subtitle_streams': subs, 'part_id': part.id}
+    except Exception:
+        return {'audio_streams': [], 'subtitle_streams': [], 'part_id': None}
 
 # ---------------------------------------------------------------------------
 # Routes
@@ -97,25 +153,25 @@ def user_select():
         account = plex.myPlexAccount()
         users = [account] + list(account.users())
         for user in users:
-            # Store the original external thumb URL; we'll proxy it
             user._thumbUrl = user.thumb
     except Exception:
         users = []
-    is_online = check_internet_connection()
     return render_template('user_select.html',
                            users=users,
                            server_title=server_title,
-                           is_online=is_online)
+                           is_online=get_internet_status())
 
 @app.route('/proxy/avatar')
 def proxy_avatar():
-    """Proxy user avatar images so they work offline after first load.
-    The browser fetches /proxy/avatar?url=<external_url> from our local server.
-    """
     url = request.args.get('url', '')
     if not url:
         abort(400)
     return proxy_image(url)
+
+@app.route('/api/status')
+def api_status():
+    """Lightweight endpoint polled by the client-side status indicator."""
+    return jsonify({'online': get_internet_status()})
 
 @app.route('/login/<username>')
 def login(username):
@@ -130,40 +186,90 @@ def logout():
 @app.route('/home')
 @login_required
 def home(user_plex):
-    is_online = check_internet_connection()
-    on_deck = enrich(user_plex.library.onDeck())
+    on_deck        = enrich(user_plex.library.onDeck())
     recently_added = enrich(user_plex.library.recentlyAdded())
-    libraries = user_plex.library.sections()
+    libraries      = user_plex.library.sections()
     return render_template('home_dashboard.html',
                            server_title=server_title,
-                           is_online=is_online,
+                           is_online=get_internet_status(),
                            on_deck=on_deck,
                            recently_added=recently_added,
                            libraries=libraries)
 
+# ---------------------------------------------------------------------------
+# Library — paginated
+# PAGE_SIZE items loaded per request; subsequent pages fetched via AJAX
+# and appended to the grid, keeping the initial render fast.
+# ---------------------------------------------------------------------------
+PAGE_SIZE = 48
+
 @app.route('/library/<library_key>')
 @login_required
 def library(user_plex, library_key):
-    is_online = check_internet_connection()
     try:
-        section = user_plex.library.sectionByID(int(library_key))
-        items = enrich(section.all())
+        section   = user_plex.library.sectionByID(int(library_key))
+        total     = section.totalSize          # fast metadata-only call
+        sort      = request.args.get('sort', 'titleSort:asc')
+        unwatched = request.args.get('unwatched', '0') == '1'
+
+        kwargs = dict(sort=sort, container_start=0, container_size=PAGE_SIZE, maxresults=PAGE_SIZE)
+        if unwatched:
+            kwargs['unwatched'] = True
+
+        items = enrich(section.search(**kwargs))
+
         return render_template('library.html',
                                section=section,
                                items=items,
+                               total=total,
+                               page_size=PAGE_SIZE,
+                               sort=sort,
+                               unwatched=unwatched,
                                server_title=server_title,
-                               is_online=is_online)
-    except Exception:
-        abort(404, "Library not found.")
+                               is_online=get_internet_status())
+    except Exception as e:
+        abort(404, f"Library not found: {e}")
+
+@app.route('/api/library/<library_key>/page')
+@login_required
+def library_page(user_plex, library_key):
+    """JSON endpoint for infinite scroll — returns the next page of cards."""
+    try:
+        section   = user_plex.library.sectionByID(int(library_key))
+        offset    = int(request.args.get('offset', 0))
+        sort      = request.args.get('sort', 'titleSort:asc')
+        unwatched = request.args.get('unwatched', '0') == '1'
+
+        kwargs = dict(sort=sort, container_start=offset, container_size=PAGE_SIZE, maxresults=PAGE_SIZE)
+        if unwatched:
+            kwargs['unwatched'] = True
+
+        items = enrich(section.search(**kwargs))
+
+        cards = []
+        for item in items:
+            vo  = item.viewOffset or 0
+            dur = item.duration   or 0
+            pct = int(vo / dur * 100) if dur > 0 else 0
+            cards.append({
+                'ratingKey':  item.ratingKey,
+                'title':      item.title,
+                'year':       item.year,
+                'thumbUrl':   item.thumbUrl,
+                'isWatched':  item.isWatched,
+                'pct':        pct,
+            })
+        return jsonify({'cards': cards, 'offset': offset, 'count': len(cards)})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/item/<int:rating_key>')
 @login_required
 def item_details(user_plex, rating_key):
-    is_online = check_internet_connection()
     try:
         item = user_plex.fetchItem(rating_key)
         item.thumbUrl = add_auth_to_url(item.thumb)
-        item.artUrl = add_auth_to_url(item.art)
+        item.artUrl   = add_auth_to_url(item.art)
         if item.type == 'show':
             for season in item.seasons():
                 season.thumbUrl = add_auth_to_url(season.thumb)
@@ -172,7 +278,7 @@ def item_details(user_plex, rating_key):
         return render_template('item_details.html',
                                item=item,
                                server_title=server_title,
-                               is_online=is_online)
+                               is_online=get_internet_status())
     except NotFound:
         abort(404, "Media not found.")
 
@@ -193,15 +299,6 @@ def mark_unwatched(user_plex, rating_key):
 @app.route('/player/<int:rating_key>/fresh')
 @login_required
 def player_fresh(user_plex, rating_key):
-    """Play from the beginning regardless of stored viewOffset."""
-    try:
-        item = user_plex.fetchItem(rating_key)
-        # Temporarily zero out the offset for this request
-        item.viewOffset = 0
-    except NotFound:
-        abort(404, "Media not found.")
-    # Redirect to normal player — but we need the offset=0 version.
-    # Easiest: just call player() logic directly with offset forced to 0.
     return redirect(url_for('player', rating_key=rating_key) + '?force_start=1')
 
 @app.route('/player/<int:rating_key>')
@@ -210,41 +307,32 @@ def player(user_plex, rating_key):
     try:
         item = user_plex.fetchItem(rating_key)
         item.thumbUrl = add_auth_to_url(item.thumb)
-        item.artUrl = add_auth_to_url(item.art)
+        item.artUrl   = add_auth_to_url(item.art)
 
-        # Resume offset in milliseconds (0 = start from beginning)
         force_start = request.args.get('force_start') == '1'
         view_offset = 0 if force_start else (item.viewOffset or 0)
         duration_ms = item.duration or 0
 
-        # Determine whether there's meaningful progress to resume from
-        # (ignore if within first 30s or within last 60s — treat as "start over")
         resumable = (
             view_offset > 30_000 and
             duration_ms > 0 and
             view_offset < duration_ms - 60_000
         )
 
-        # Build stream URL. Prefer direct play; Plex will transcode if needed.
-        # We append the offset so playback resumes correctly.
-        stream_url = (
-            f"{config.PLEX_URL}/video/:/transcode/universal/start.m3u8"
-            f"?hasMDE=1"
-            f"&path=/library/metadata/{item.ratingKey}"
-            f"&mediaIndex=0"
-            f"&partIndex=0"
-            f"&protocol=hls"
-            f"&fastSeek=1"
-            f"&directPlay=1"
-            f"&directStream=1"
-            f"&subtitleSize=100"
-            f"&audioBoost=100"
-            f"&X-Plex-Token={config.PLEX_TOKEN}"
-            f"&X-Plex-Client-Identifier=plex-offline-launcher"
-            f"&X-Plex-Product=PlexOfflineLauncher"
-            f"&X-Plex-Version=1.0"
-            f"&X-Plex-Platform=Chrome"
-            f"&offset={view_offset // 1000}"  # Plex offset is in seconds for transcode URL
+        # Collect audio / subtitle streams for the track selector
+        streams = get_streams(item)
+
+        # Find the currently-selected audio stream ID so we can pass it in the URL
+        selected_audio    = next((s for s in streams['audio_streams']    if s['selected']), None)
+        selected_subtitle = next((s for s in streams['subtitle_streams'] if s['selected']), None)
+
+        audio_stream_id    = selected_audio['id']    if selected_audio    else None
+        subtitle_stream_id = selected_subtitle['id'] if selected_subtitle else None
+
+        stream_url = _build_stream_url(
+            item.ratingKey, view_offset,
+            audio_stream_id=audio_stream_id,
+            subtitle_stream_id=subtitle_stream_id,
         )
 
         prev_ep = next_ep = None
@@ -264,41 +352,77 @@ def player(user_plex, rating_key):
                                duration_ms=duration_ms,
                                resumable=resumable,
                                prev_ep=prev_ep,
-                               next_ep=next_ep)
+                               next_ep=next_ep,
+                               streams=streams)
     except NotFound:
         abort(404, "Media not found.")
+
+def _build_stream_url(rating_key, offset_ms, audio_stream_id=None, subtitle_stream_id=None):
+    params = (
+        f"hasMDE=1"
+        f"&path=/library/metadata/{rating_key}"
+        f"&mediaIndex=0&partIndex=0"
+        f"&protocol=hls"
+        f"&fastSeek=1"
+        f"&directPlay=1&directStream=1"
+        f"&subtitleSize=100&audioBoost=100"
+        f"&X-Plex-Token={config.PLEX_TOKEN}"
+        f"&X-Plex-Client-Identifier=plex-offline-launcher"
+        f"&X-Plex-Product=PlexOfflineLauncher"
+        f"&X-Plex-Version=1.0"
+        f"&X-Plex-Platform=Chrome"
+        f"&offset={offset_ms // 1000}"
+    )
+    if audio_stream_id is not None:
+        params += f"&audioStreamID={audio_stream_id}"
+    if subtitle_stream_id is not None:
+        params += f"&subtitleStreamID={subtitle_stream_id}"
+    return f"{config.PLEX_URL}/video/:/transcode/universal/start.m3u8?{params}"
+
+@app.route('/api/stream_url/<int:rating_key>')
+@login_required
+def api_stream_url(user_plex, rating_key):
+    """Return a fresh stream URL with a new audio/subtitle selection.
+    Called by the player JS when the user switches tracks without reloading the page.
+    """
+    offset_ms          = int(request.args.get('offset_ms', 0))
+    audio_stream_id    = request.args.get('audio_id',    None)
+    subtitle_stream_id = request.args.get('subtitle_id', None)
+
+    if audio_stream_id    is not None: audio_stream_id    = int(audio_stream_id)
+    if subtitle_stream_id is not None: subtitle_stream_id = int(subtitle_stream_id)
+
+    # If subtitle_id == 0, treat as "no subtitles"
+    if subtitle_stream_id == 0:
+        subtitle_stream_id = None
+
+    url = _build_stream_url(rating_key, offset_ms,
+                            audio_stream_id=audio_stream_id,
+                            subtitle_stream_id=subtitle_stream_id)
+    return jsonify({'stream_url': url})
 
 @app.route('/api/scrobble/<int:rating_key>', methods=['POST'])
 @login_required
 def scrobble(user_plex, rating_key):
-    """Called by the player JS to report playback progress back to Plex.
-    Keeps On Deck accurate and enables resume across sessions/devices.
-    """
-    data = request.get_json(silent=True) or {}
-    offset_ms = data.get('offset_ms', 0)   # current position in milliseconds
-    state = data.get('state', 'playing')   # 'playing', 'paused', 'stopped'
-
+    data      = request.get_json(silent=True) or {}
+    offset_ms = data.get('offset_ms', 0)
+    state     = data.get('state', 'playing')
     try:
-        # Use the raw Plex API timeline endpoint to update progress
         params = {
             'ratingKey': rating_key,
-            'key': f'/library/metadata/{rating_key}',
-            'state': state,
-            'time': int(offset_ms),
-            'duration': data.get('duration_ms', 0),
-            'X-Plex-Token': config.PLEX_TOKEN,
+            'key':       f'/library/metadata/{rating_key}',
+            'state':     state,
+            'time':      int(offset_ms),
+            'duration':  data.get('duration_ms', 0),
+            'X-Plex-Token':              config.PLEX_TOKEN,
             'X-Plex-Client-Identifier': 'plex-offline-launcher',
-            'X-Plex-Product': 'PlexOfflineLauncher',
-            'X-Plex-Version': '1.0',
+            'X-Plex-Product':           'PlexOfflineLauncher',
+            'X-Plex-Version':           '1.0',
         }
-        # Switch to user token if needed
-        if session.get('username'):
-            try:
-                user_token = user_plex._token
-                params['X-Plex-Token'] = user_token
-            except Exception:
-                pass
-
+        try:
+            params['X-Plex-Token'] = user_plex._token
+        except Exception:
+            pass
         requests.get(f"{config.PLEX_URL}/:/timeline", params=params, timeout=5)
         return jsonify({'ok': True})
     except Exception as e:
@@ -307,8 +431,7 @@ def scrobble(user_plex, rating_key):
 @app.route('/search')
 @login_required
 def search(user_plex):
-    query = request.args.get('query', '').strip()
-    is_online = check_internet_connection()
+    query   = request.args.get('query', '').strip()
     results = []
     if query:
         results = enrich(user_plex.search(query))
@@ -316,7 +439,7 @@ def search(user_plex):
                            query=query,
                            results=results,
                            server_title=server_title,
-                           is_online=is_online)
+                           is_online=get_internet_status())
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=False)

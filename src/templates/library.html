@@ -1,24 +1,128 @@
 {% extends "base.html" %}
 {% block title %}{{ section.title }} — {{ server_title }}{% endblock %}
+{% block head %}
+<style>
+    .library-toolbar {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        margin-bottom: 1.75rem;
+    }
+    .library-title {
+        font-family: var(--font-heading);
+        font-size: 2rem;
+        letter-spacing: 0.03em;
+        flex-shrink: 0;
+    }
+    .library-count {
+        color: var(--text-muted);
+        font-size: 0.9rem;
+        flex-shrink: 0;
+    }
+    .toolbar-spacer { flex: 1; }
+
+    /* Sort / filter controls */
+    .toolbar-select {
+        background: var(--surface2);
+        border: 1px solid var(--border);
+        color: var(--text);
+        font-family: inherit;
+        font-size: 0.85rem;
+        padding: 0.4rem 0.75rem;
+        border-radius: 7px;
+        cursor: pointer;
+        outline: none;
+        transition: border-color 0.2s;
+    }
+    .toolbar-select:focus { border-color: var(--gold); }
+
+    .toolbar-toggle {
+        display: flex; align-items: center; gap: 0.45rem;
+        background: var(--surface2);
+        border: 1px solid var(--border);
+        color: var(--text-muted);
+        font-family: inherit;
+        font-size: 0.85rem;
+        padding: 0.4rem 0.85rem;
+        border-radius: 7px;
+        cursor: pointer;
+        transition: color 0.15s, border-color 0.15s, background 0.15s;
+        white-space: nowrap;
+    }
+    .toolbar-toggle.active {
+        color: var(--gold);
+        border-color: var(--gold-dim);
+        background: rgba(229,160,13,0.08);
+    }
+    .toolbar-toggle:hover { color: var(--text); border-color: var(--text-muted); }
+
+    /* Scroll sentinel */
+    #scroll-sentinel {
+        height: 1px;
+        margin-top: 2rem;
+    }
+    .load-indicator {
+        text-align: center;
+        padding: 2rem;
+        color: var(--text-muted);
+        font-size: 0.9rem;
+        display: none;
+    }
+    .load-indicator.visible { display: block; }
+    .load-spinner {
+        display: inline-block;
+        width: 24px; height: 24px;
+        border: 2px solid var(--border);
+        border-top-color: var(--gold);
+        border-radius: 50%;
+        animation: spin 0.7s linear infinite;
+        vertical-align: middle;
+        margin-right: 0.5rem;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+{% endblock %}
 {% block content %}
-<div class="section-header" style="margin-bottom:2rem;">
-    <h1 class="section-title" style="font-size:2rem;">{{ section.title }}</h1>
-    <span style="color:var(--text-muted);font-size:0.9rem;">{{ items|length }} items</span>
+
+<div class="library-toolbar">
+    <h1 class="library-title">{{ section.title }}</h1>
+    <span class="library-count" id="count-label">
+        {% if unwatched %}Showing unwatched{% else %}{{ total }} items{% endif %}
+    </span>
+    <div class="toolbar-spacer"></div>
+
+    <!-- Sort -->
+    <select class="toolbar-select" id="sort-select">
+        <option value="titleSort:asc"   {% if sort == 'titleSort:asc'   %}selected{% endif %}>A – Z</option>
+        <option value="titleSort:desc"  {% if sort == 'titleSort:desc'  %}selected{% endif %}>Z – A</option>
+        <option value="addedAt:desc"    {% if sort == 'addedAt:desc'    %}selected{% endif %}>Recently Added</option>
+        <option value="addedAt:asc"     {% if sort == 'addedAt:asc'     %}selected{% endif %}>Oldest Added</option>
+        <option value="originallyAvailableAt:desc" {% if sort == 'originallyAvailableAt:desc' %}selected{% endif %}>Newest Release</option>
+        <option value="rating:desc"     {% if sort == 'rating:desc'     %}selected{% endif %}>Top Rated</option>
+    </select>
+
+    <!-- Unwatched only toggle -->
+    <button class="toolbar-toggle {% if unwatched %}active{% endif %}" id="unwatched-toggle">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+            <circle cx="12" cy="12" r="3"/>
+        </svg>
+        Unwatched only
+    </button>
 </div>
 
 {% if items %}
-<div class="media-grid">
+<div class="media-grid" id="media-grid">
     {% for item in items %}
-    {% set vo = item.viewOffset or 0 %}
-    {% set dur = item.duration or 0 %}
+    {% set vo  = item.viewOffset or 0 %}
+    {% set dur = item.duration   or 0 %}
     {% set pct = ((vo / dur * 100) | int) if dur > 0 else 0 %}
     <a href="/item/{{ item.ratingKey }}" class="card">
         {% if item.isWatched %}<span class="watched-badge">✓</span>{% endif %}
         <img src="{{ item.thumbUrl }}" alt="{{ item.title }}" class="card-thumb" loading="lazy">
         {% if pct > 0 and not item.isWatched %}
-        <div class="card-progress">
-            <div class="card-progress-fill" style="width: {{ pct }}%"></div>
-        </div>
+        <div class="card-progress"><div class="card-progress-fill" style="width:{{ pct }}%"></div></div>
         {% endif %}
         <div class="card-body">
             <div class="card-title">{{ item.title }}</div>
@@ -28,8 +132,137 @@
     {% endfor %}
 </div>
 {% else %}
-<div class="empty-state">
-    <p>This library appears to be empty.</p>
+<div class="media-grid" id="media-grid"></div>
+<div class="empty-state" id="empty-state">
+    <p>{% if unwatched %}No unwatched items in this library.{% else %}This library appears to be empty.{% endif %}</p>
 </div>
 {% endif %}
+
+<div class="load-indicator" id="load-indicator">
+    <span class="load-spinner"></span> Loading more…
+</div>
+<div id="scroll-sentinel"></div>
+
+<script>
+(function () {
+    var LIBRARY_KEY = {{ section.key | tojson }};
+    var PAGE_SIZE   = {{ page_size }};
+    var TOTAL       = {{ total }};
+    var currentSort = {{ sort | tojson }};
+    var unwatched   = {{ 'true' if unwatched else 'false' }};
+
+    var grid        = document.getElementById('media-grid');
+    var indicator   = document.getElementById('load-indicator');
+    var sentinel    = document.getElementById('scroll-sentinel');
+    var countLabel  = document.getElementById('count-label');
+    var emptyState  = document.getElementById('empty-state');
+    var sortSelect  = document.getElementById('sort-select');
+    var uwToggle    = document.getElementById('unwatched-toggle');
+
+    var offset      = {{ items | length }};   // already-rendered count
+    var loading     = false;
+    var exhausted   = offset >= TOTAL;
+
+    // ── Card builder ─────────────────────────────────────────────────────────
+    function buildCard(card) {
+        var a   = document.createElement('a');
+        a.href  = '/item/' + card.ratingKey;
+        a.className = 'card';
+
+        if (card.isWatched) {
+            var badge = document.createElement('span');
+            badge.className   = 'watched-badge';
+            badge.textContent = '✓';
+            a.appendChild(badge);
+        }
+
+        var img   = document.createElement('img');
+        img.src   = card.thumbUrl;
+        img.alt   = card.title;
+        img.className = 'card-thumb';
+        img.loading   = 'lazy';
+        a.appendChild(img);
+
+        if (card.pct > 0 && !card.isWatched) {
+            var prog  = document.createElement('div');
+            prog.className = 'card-progress';
+            var fill  = document.createElement('div');
+            fill.className = 'card-progress-fill';
+            fill.style.width = card.pct + '%';
+            prog.appendChild(fill);
+            a.appendChild(prog);
+        }
+
+        var body  = document.createElement('div');
+        body.className = 'card-body';
+        var title = document.createElement('div');
+        title.className   = 'card-title';
+        title.textContent = card.title;
+        var meta  = document.createElement('div');
+        meta.className    = 'card-meta';
+        meta.textContent  = card.year || '';
+        body.appendChild(title);
+        body.appendChild(meta);
+        a.appendChild(body);
+
+        return a;
+    }
+
+    // ── Fetch next page ───────────────────────────────────────────────────────
+    function loadMore() {
+        if (loading || exhausted) return;
+        loading = true;
+        indicator.classList.add('visible');
+
+        var url = '/api/library/' + LIBRARY_KEY + '/page'
+            + '?offset=' + offset
+            + '&sort='   + encodeURIComponent(currentSort)
+            + '&unwatched=' + (unwatched ? '1' : '0');
+
+        fetch(url)
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                if (data.error) { console.error(data.error); return; }
+                data.cards.forEach(function (card) {
+                    grid.appendChild(buildCard(card));
+                });
+                offset   += data.count;
+                exhausted = data.count < PAGE_SIZE;
+                loading   = false;
+                indicator.classList.remove('visible');
+                if (emptyState && offset > 0) emptyState.style.display = 'none';
+            })
+            .catch(function () {
+                loading = false;
+                indicator.classList.remove('visible');
+            });
+    }
+
+    // ── Infinite scroll via IntersectionObserver ──────────────────────────────
+    if ('IntersectionObserver' in window) {
+        var obs = new IntersectionObserver(function (entries) {
+            if (entries[0].isIntersecting) loadMore();
+        }, { rootMargin: '200px' });
+        obs.observe(sentinel);
+    }
+
+    // ── Sort / filter controls ────────────────────────────────────────────────
+    function reloadWithParams() {
+        var url = window.location.pathname
+            + '?sort='      + encodeURIComponent(currentSort)
+            + '&unwatched=' + (unwatched ? '1' : '0');
+        window.location.href = url;
+    }
+
+    sortSelect.addEventListener('change', function () {
+        currentSort = this.value;
+        reloadWithParams();
+    });
+
+    uwToggle.addEventListener('click', function () {
+        unwatched = !unwatched;
+        reloadWithParams();
+    });
+})();
+</script>
 {% endblock %}
