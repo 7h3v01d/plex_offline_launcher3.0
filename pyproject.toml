@@ -1,0 +1,22 @@
+[project]
+name = "plex-offline-launcher"
+version = "3.0.0"
+description = "Self-hosted offline-capable Plex web client"
+requires-python = ">=3.11"
+dependencies = [
+    "Flask>=3.0,<4.0",
+    "python-plexapi>=4.15,<5.0",
+    "requests>=2.31,<3.0",
+    "python-dotenv>=1.0,<2.0",
+    "waitress>=3.0,<4.0",
+]
+
+[project.scripts]
+plex-launcher = "app:app"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
